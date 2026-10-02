@@ -1,0 +1,160 @@
+<!DOCTYPE html>
+<html lang="en-GB">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Brora Sky Planner</title>
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.css">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/suncalc/1.9.0/suncalc.min.js"></script>
+<style>
+:root{--bg:#14202b;--panel:#1c2b38;--ink:#e8e2d6;--mute:#8fa3b3;--line:#2e4152;--accent:#f0a35e;box-sizing:border-box}
+*{box-sizing:inherit}
+html,body{height:100%;margin:0;background:var(--bg);color:var(--ink);font:15px/1.4 Georgia,"Times New Roman",serif}
+body{display:flex;flex-direction:column;padding-top:env(safe-area-inset-top,0px)}
+header{padding:10px 14px 6px;display:flex;justify-content:space-between;align-items:baseline;gap:10px}
+h1{font-size:19px;margin:0;font-weight:normal;letter-spacing:.2px}
+#status{color:var(--mute);font-size:12px;font-family:system-ui,sans-serif}
+#map{flex:1;min-height:0;background:#0e1820}
+.panel{background:var(--panel);border-top:1px solid var(--line);padding:10px 14px calc(12px + env(safe-area-inset-bottom,0px));font-family:system-ui,sans-serif}
+.row{display:flex;gap:6px;align-items:center;flex-wrap:wrap}
+button{background:none;border:1px solid var(--line);color:var(--ink);padding:7px 12px;border-radius:6px;font:inherit;font-size:13px;cursor:pointer}
+button.on{border-color:var(--accent);color:var(--accent)}
+button:focus-visible,input:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+#when{font:17px Georgia,serif;margin:8px 0 2px}
+input[type=range]{width:100%;accent-color:var(--accent);margin:6px 0}
+#score{font-size:13px;color:var(--mute)}
+#score b{color:var(--accent);font-weight:600}
+.legend{font-size:12px;color:var(--mute)}
+</style>
+</head>
+<body>
+<header><h1>Brora Sky Planner</h1><span id="status">Loading forecast…</span></header>
+<div id="map"></div>
+<div class="panel">
+  <div class="row" id="layers">
+    <button data-l="low">Low cloud</button>
+    <button data-l="mid">Mid cloud</button>
+    <button data-l="high" class="on">High cloud</button>
+    <button id="sun">Jump to sunset</button>
+  </div>
+  <div id="when"></div>
+  <input type="range" id="t" min="0" max="47" value="0" aria-label="Forecast hour">
+  <div id="score"></div>
+  <div class="legend">Dashed line: direction of sunset from Brora. Forecast: Open-Meteo.</div>
+</div>
+<script>
+const HOME=[58.01,-3.85], NLAT=9, NLON=9, DLAT=0.3, DLON=0.6;
+const COLORS={low:'#9fb0bf',mid:'#5aa0e6',high:'#f0a35e'};
+let layer='high', data=null, times=[], rects=[], pts=[];
+const map=L.map('map',{zoomControl:true}).setView(HOME,8);
+L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',{maxZoom:12,attribution:'© OpenStreetMap'}).addTo(map);
+L.circleMarker(HOME,{radius:6,color:'#fff',weight:2,fillColor:'#f0a35e',fillOpacity:1}).addTo(map).bindTooltip('Brora');
+
+// Grid of forecast points around Brora
+for(let i=0;i<NLAT;i++)for(let j=0;j<NLON;j++)
+  pts.push([+(HOME[0]+(i-(NLAT-1)/2)*DLAT).toFixed(3),+(HOME[1]+(j-(NLON-1)/2)*DLON).toFixed(3)]);
+
+function sunInfo(d){
+  const t=SunCalc.getTimes(d,HOME[0],HOME[1]);
+  const az=SunCalc.getPosition(t.sunset,HOME[0],HOME[1]).azimuth;
+  return {sunset:t.sunset,bearing:(az*180/Math.PI+180+360)%360};
+}
+function dest(bearing,km){
+  const R=6371,b=bearing*Math.PI/180,la=HOME[0]*Math.PI/180,lo=HOME[1]*Math.PI/180,d=km/R;
+  const la2=Math.asin(Math.sin(la)*Math.cos(d)+Math.cos(la)*Math.sin(d)*Math.cos(b));
+  const lo2=lo+Math.atan2(Math.sin(b)*Math.sin(d)*Math.cos(la),Math.cos(d)-Math.sin(la)*Math.sin(la2));
+  return [la2*180/Math.PI,lo2*180/Math.PI];
+}
+function ukHourKey(date){
+  const s=date.toLocaleString('sv-SE',{timeZone:'Europe/London'});
+  let [d,t]=s.split(' '); let h=+t.slice(0,2); if(+t.slice(3,5)>=30)h++;
+  if(h>23){return null}
+  return d+'T'+String(h).padStart(2,'0')+':00';
+}
+let sunLine=null;
+function drawSunLine(){
+  const idx=+document.getElementById('t').value;
+  const day=new Date(times[idx]+':00Z'); // date only matters
+  const s=sunInfo(new Date(day.getTime()+12*3600e3));
+  if(sunLine)map.removeLayer(sunLine);
+  sunLine=L.polyline([HOME,dest(s.bearing,180)],{color:'#fff',weight:2,dashArray:'6 6',opacity:.8}).addTo(map);
+}
+function nearest(lat,lon){
+  let best=0,bd=1e9;
+  pts.forEach((p,k)=>{const d=(p[0]-lat)**2+((p[1]-lon)*.55)**2;if(d<bd){bd=d;best=k}});
+  return best;
+}
+function score(idx){
+  const day=times[idx].slice(0,10);
+  const s=sunInfo(new Date(day+'T12:00:00Z'));
+  const key=ukHourKey(s.sunset);
+  if(!key||times[idx]!==key)return '';
+  let lo=0,mi=0,hi=0,n=0;
+  [25,60,110,160].forEach(km=>{
+    const p=dest(s.bearing,km),k=nearest(p[0],p[1]),h=data[k].hourly;
+    lo+=h.cloud_cover_low[idx];mi+=h.cloud_cover_mid[idx];hi+=h.cloud_cover_high[idx];n++;
+  });
+  lo/=n;mi/=n;hi/=n;
+  const m=Math.max(mi,hi);
+  let q=.2+.8*Math.min(m,60)/60; if(m>85)q-=.3;
+  q*=1-.9*lo/100;
+  const pct=Math.max(0,Math.min(100,Math.round(q*100)));
+  const word=pct>=70?'Promising':pct>=45?'Possible':'Unlikely';
+  return `Sunset at ${s.sunset.toLocaleTimeString('en-GB',{timeZone:'Europe/London',hour:'2-digit',minute:'2-digit'})} (bearing ${Math.round(s.bearing)}°). Colour outlook: <b>${word}</b> (${pct}/100). Along the sun line: low ${Math.round(lo)}%, mid ${Math.round(mi)}%, high ${Math.round(hi)}%.`;
+}
+function render(){
+  if(!data)return;
+  const idx=+document.getElementById('t').value;
+  const key={low:'cloud_cover_low',mid:'cloud_cover_mid',high:'cloud_cover_high'}[layer];
+  rects.forEach((r,k)=>{
+    const v=data[k].hourly[key][idx]||0;
+    r.setStyle({fillColor:COLORS[layer],fillOpacity:v/100*.75,opacity:0});
+    r.setTooltipContent(Math.round(v)+'%');
+  });
+  const dt=new Date(times[idx]+':00Z');
+  document.getElementById('when').textContent=dt.toLocaleString('en-GB',{timeZone:'UTC',weekday:'long',hour:'2-digit',minute:'2-digit'});
+  document.getElementById('score').innerHTML=score(idx);
+  drawSunLine();
+}
+function jumpToSunset(){
+  const now=new Date();
+  for(const add of [0,1]){
+    const s=sunInfo(new Date(now.getTime()+add*86400e3));
+    if(s.sunset>now||add===1){
+      const k=ukHourKey(s.sunset), i=times.indexOf(k);
+      if(i>=0){document.getElementById('t').value=i;render();return}
+    }
+  }
+}
+async function load(){
+  const q=new URLSearchParams({latitude:pts.map(p=>p[0]).join(','),longitude:pts.map(p=>p[1]).join(','),
+    hourly:'cloud_cover_low,cloud_cover_mid,cloud_cover_high',timezone:'Europe/London',forecast_days:2});
+  try{
+    const r=await fetch('https://api.open-meteo.com/v1/forecast?'+q);
+    if(!r.ok)throw new Error(r.status);
+    data=await r.json();
+    times=data[0].hourly.time;
+    pts.forEach(p=>{
+      const rc=L.rectangle([[p[0]-DLAT/2,p[1]-DLON/2],[p[0]+DLAT/2,p[1]+DLON/2]],{weight:0,interactive:true}).addTo(map).bindTooltip('');
+      rects.push(rc);
+    });
+    const nowKey=ukHourKey(new Date());
+    document.getElementById('t').value=Math.max(0,times.indexOf(nowKey));
+    document.getElementById('status').textContent='Updated '+new Date().toLocaleTimeString('en-GB',{hour:'2-digit',minute:'2-digit'});
+    render();
+  }catch(e){
+    document.getElementById('status').textContent='Could not load forecast. Check your connection and refresh.';
+  }
+}
+document.getElementById('t').addEventListener('input',render);
+document.getElementById('sun').addEventListener('click',jumpToSunset);
+document.querySelectorAll('#layers [data-l]').forEach(b=>b.addEventListener('click',()=>{
+  layer=b.dataset.l;
+  document.querySelectorAll('#layers [data-l]').forEach(x=>x.classList.toggle('on',x===b));
+  render();
+}));
+load();
+</script>
+</body>
+</html>
